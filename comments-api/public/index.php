@@ -13,7 +13,7 @@ require_once __DIR__ . '/../vendor/autoload.php';
 $servername = 'localhost';
 $username = 'root';
 $password = 'rootroot';
-$database = 'commentsDB2';
+$database = 'commentsDB';
 $secretKey = '6LfQ8BAoAAAAAMK8prCSdQ6cOX52XW7MHITNviY6';
 $err = '';
 

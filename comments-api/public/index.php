@@ -1,6 +1,5 @@
 <?php
 
-// use App\Models\DB;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
 use Slim\Exception\HttpNotFoundException;
@@ -9,44 +8,35 @@ use Slim\Factory\AppFactory;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Log\LoggerInterface;
 
-use AppHandler\customErrorHandler as customErrorHandler;
-
 require_once __DIR__ . '/../vendor/autoload.php';
 
-$servername = "localhost";
-$username = "root";
-$password = "rootroot";
-$database = "commentsDB";
-$secretKey = "6LfQ8BAoAAAAAMK8prCSdQ6cOX52XW7MHITNviY6";
+$servername = 'localhost';
+$username = 'root';
+$password = 'rootroot';
+$database = 'commentsDB2';
+$secretKey = '6LfQ8BAoAAAAAMK8prCSdQ6cOX52XW7MHITNviY6';
+$err = '';
 
-////////
-function connect($sql)
-{
-  global $servername;
-  global $username;
-  global $password;
-  global $database;
+// Функция для установления соединения с БД и отправки запроса
+$connect = function ($sql) use ($servername, $username, $password, $database) {
   try {
     $mysqli = new mysqli($servername, $username, $password, $database);
-    $mysqli->set_charset("utf8");
-    $link = mysqli_connect($servername, $username, $password, $database);
-    $result = mysqli_query($link, $sql);
+  } catch (Exception $e) {
+    throw new Exception('Ошибка подключения к базе данных.');
+  };
+  try {
+    $mysqli->set_charset('utf8');
+    $result = mysqli_query($mysqli, $sql);
     $mysqli->close();
-  } catch (PDOException $e) {
-    $result = (array(
-      "message" => $e->getMessage()
-    ));
+  } catch (Exception $e) {
+    throw new Exception('Ошибка отправки запроса к базе данных.');
   };
 
   return $result;
-}
-////////////
+};
 
-$app = AppFactory::create();
-
-$app->addRoutingMiddleware();
-
-$app->add(function ($request, $handler) {
+// Обработчик uri, который убирает лишние символы: '/'
+$slashHandler = function ($request, $handler) {
   $uri = $request->getUri();
   $path = $uri->getPath();
   if ($path != '/' && substr($path, -1) == '/') {
@@ -65,9 +55,15 @@ $app->add(function ($request, $handler) {
   $response = $handler->handle($request);
 
   return $response;
-});
+};
 
-// Define Custom Error Handler
+$app = AppFactory::create();
+
+$app->addRoutingMiddleware();
+
+$app->add($slashHandler);
+
+//Кастомный обработчик ошибок
 $customErrorHandler = function (
   ServerRequestInterface $request,
   Throwable $exception,
@@ -75,13 +71,17 @@ $customErrorHandler = function (
   bool $logErrors,
   bool $logErrorDetails,
   ?LoggerInterface $logger = null
-) use ($app) {
-  global $error;
+) use ($app, $err) {
   if ($logger) {
     $logger->error($exception->getMessage());
   }
-
-  $payload = ['error' => $exception->getMessage()];
+  $payload = [];
+  if (strlen($err) !== 0) {
+    $payload = ['error' => $err];
+    $err = '';
+  } else {
+    $payload = ['error' => $exception->getMessage()];
+  }
 
   $response = $app->getResponseFactory()->createResponse();
   $response->getBody()->write(
@@ -92,33 +92,31 @@ $customErrorHandler = function (
   return $newResponse;
 };
 
-// Add Error Middleware
+// Добавление слоя для обработки ошибок
 $errorMiddleware = $app->addErrorMiddleware(true, true, true);
 $errorMiddleware->setDefaultErrorHandler($customErrorHandler);
 
-// Create connection
+// Установление соединения с MySQL, cоздание БД и таблицы в ней (если их не существует)
 try {
-  $conn = new mysqli($servername, $username, $password);
-
-  // Create database
+  $mysqli = new mysqli($servername, $username, $password);
   $sqlBD = "CREATE DATABASE IF NOT EXISTS $database";
-  if ($conn->query($sqlBD) === TRUE) {
-    $link = mysqli_connect($servername, $username, $password, $database);
-    $sqlTB = "CREATE TABLE IF NOT EXISTS comments(
+  $mysqli->query($sqlBD);
+  $mysqli->close();
+  $link = new mysqli($servername, $username, $password, $database);
+  $sqlTB = "CREATE TABLE IF NOT EXISTS comments(
       id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
       userName VARCHAR(30) NOT NULL,
       comment VARCHAR(400) NOT NULL,
       creationDate VARCHAR(50) NOT NULL
     )";
-  } else {
-    throw new Exception("Не удалось создать базу данных: " . $conn->error);
-  }
-  $conn->close();
+  $link->query($sqlTB);
+  $link->close();
 } catch (Exception $e) {
-  $err = $e->getMessage();
+  // throw new Exception("Не удалось создать базу данных");
+  $err = 'Не удалось создать базу данных';
 };
 
-
+// Создание Header для ответа
 $app->add(function ($request, $handler) {
   $response = $handler->handle($request);
   return $response
@@ -127,28 +125,23 @@ $app->add(function ($request, $handler) {
     ->withHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
 });
 
-
+// Обработка запросов OPTIONS
 $app->options('/{routes:.+}', function ($request, $response, $args) {
   return $response;
 });
 
-$app->get('/', function (Request $request, Response $response) {
-  $response->getBody()->write('Hello World!');
-  return $response;
-});
-
-$app->get('/comments', function (Request $request, Response $response) {
+// Обработка запросов на получение всех комментариев
+$app->get('/comments', function (Request $request, Response $response) use ($connect) {
   $sql = "SELECT * FROM comments";
-  $result = connect($sql);
+  $result = $connect($sql);
   $rows = mysqli_fetch_all($result, MYSQLI_ASSOC);
   $payload = json_encode($rows);
   $response->getBody()->write($payload);
   return $response;
 });
 
-$app->post('/comments', function (Request $request, Response $response) {
-  global $secretKey;
-
+// Обработка запросов на сохранение нового комментария с ReCAPTCHA
+$app->post('/comments', function (Request $request, Response $response) use ($connect, $secretKey) {
   $body = $request->getBody();
   $data = json_decode($body, true);
   $user = $data['userName'];
@@ -160,27 +153,29 @@ $app->post('/comments', function (Request $request, Response $response) {
   $verify = file_get_contents("https://www.google.com/recaptcha/api/siteverify?secret={$secret}&response={$captcha}");
   $captcha_success = json_decode($verify);
   if ($captcha_success->success == false) {
-    throw new Exception('Are you a robot?', 403);
+    throw new Exception('Ты точно не робот?', 403);
   }
 
   $sql = "INSERT INTO comments (userName, comment, creationDate) VALUES
     ('$user', '$comment', '$date')";
-  $result = connect($sql);
+  $result = $connect($sql);
   $payload = json_encode($result);
   $response->getBody()->write($payload);
   return $response;
 });
 
-$app->delete('/comments/{id}', function (Request $request, Response $response, $params) {
+// Обработка запросов на удаление комментария
+$app->delete('/comments/{id}', function (Request $request, Response $response, $params) use ($connect) {
   $id = $params['id'];
   $num = (int)$id;
   $sql = "DELETE FROM comments WHERE id=$num";
-  $result = connect($sql);
+  $result = $connect($sql);
   $payload = json_encode($result);
   $response->getBody()->write($payload);
   return $response;
 });
 
+// Обработка всех остальных запросов
 $app->map(['GET', 'POST', 'PUT', 'DELETE', 'PATCH'], '/{routes:.+}', function ($request, $response) {
   throw new HttpNotFoundException($request);
 });
